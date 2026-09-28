@@ -3,141 +3,203 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Visor de Habitaciones BIM</title>
+    <title>Visor BIM 3D - Habitaciones</title>
     <style>
-        body { 
-            font-family: 'Segoe UI', Arial, sans-serif; 
-            background-color: #f0f2f5; 
-            margin: 0; 
-            padding: 20px;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-        }
-        h2 { color: #333; margin-bottom: 5px; }
-        p { color: #666; margin-top: 0; margin-bottom: 20px; }
+        body { margin: 0; overflow: hidden; background-color: #1e1e1e; font-family: 'Segoe UI', Arial, sans-serif; }
         
-        /* Contenedor del mapa SVG */
-        #visor-svg {
-            background-color: #ffffff;
-            border-radius: 8px;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
-            width: 90vw;
-            height: 75vh;
-            max-width: 1200px;
-        }
-
-        /* Estilos de las habitaciones dibujadas */
-        .room {
-            fill: #bbdefb;          /* Color de relleno (Azul claro) */
-            stroke: #1976d2;        /* Color del borde (Azul oscuro) */
-            stroke-width: 0.05;     /* Grosor de línea escalado en metros */
-            cursor: pointer;
-            transition: fill 0.2s ease-in-out;
-        }
-        
-        .room:hover {
-            fill: #ffb74d;          /* Color al pasar el ratón (Naranja) */
-        }
-
-        /* Etiqueta flotante con datos */
-        #tooltip {
+        /* Panel flotante de información */
+        #ui-panel {
             position: absolute;
-            background: rgba(33, 33, 33, 0.9);
-            color: #fff;
-            padding: 10px 15px;
-            border-radius: 6px;
-            pointer-events: none;
-            opacity: 0;
-            font-size: 14px;
-            line-height: 1.5;
-            transition: opacity 0.1s;
-            box-shadow: 0 2px 6px rgba(0,0,0,0.3);
-            z-index: 10;
+            top: 20px;
+            left: 20px;
+            background: rgba(30, 30, 30, 0.85);
+            color: white;
+            padding: 15px 25px;
+            border-radius: 8px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+            pointer-events: none; /* Deja que los clics pasen a través del panel */
+            border-left: 4px solid #1976d2;
+            backdrop-filter: blur(5px);
         }
+        
+        h3 { margin: 0 0 10px 0; color: #64b5f6; }
+        p { margin: 5px 0; font-size: 14px; }
+        .instruccion { font-size: 12px; color: #aaa; margin-top: 15px; border-top: 1px solid #444; padding-top: 5px;}
     </style>
+    
+    <!-- Cargamos Three.js y OrbitControls desde CDN -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
 </head>
 <body>
 
-    <h2>📊 Planimetría de Habitaciones</h2>
-    <p>Pasa el cursor sobre los espacios para ver la información extraída de Revit.</p>
-
-    <!-- Lienzo donde Javascript dibujará el modelo -->
-    <svg id="visor-svg"></svg>
-    <div id="tooltip"></div>
+    <div id="ui-panel">
+        <h3 id="room-name">Esperando selección...</h3>
+        <p id="room-level">Pasa el ratón sobre una habitación</p>
+        <p id="room-area"></p>
+        <p class="instruccion">🖱️ Click Izq: Orbitar | Click Der: Mover | Rueda: Zoom</p>
+    </div>
 
     <script>
-        // Cargar el archivo JSON que exportaste con el script de pyRevit
+        // 1. Configuración de la Escena 3D
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x2a2a2a); // Fondo oscuro estilo software BIM
+        
+        const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 2000);
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        // 2. Controles de Órbita
+        const controls = new THREE.OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true; 
+        controls.dampingFactor = 0.05;
+
+        // 3. Luces
+        const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+        dirLight.position.set(50, 100, 50);
+        scene.add(dirLight);
+        scene.add(new THREE.AmbientLight(0xffffff, 0.5));
+
+        const meshes = []; // Lista para guardar los objetos y detectarlos con el ratón
+        const coloresPorNivel = {}; 
+
+        // Generador de colores para diferenciar niveles
+        function getColorFresco() {
+            const colores = [0xbbdefb, 0xc8e6c9, 0xffe082, 0xe1bee7, 0xffccbc, 0xb2dfdb];
+            return colores[Math.floor(Math.random() * colores.length)];
+        }
+
+        // 4. Cargar el archivo JSON y modelar
         fetch('Rooms_Geometria.json')
-            .then(response => {
-                if (!response.ok) throw new Error("No se pudo cargar el archivo JSON.");
-                return response.json();
-            })
+            .then(res => res.json())
             .then(data => {
-                const svg = document.getElementById('visor-svg');
-                const tooltip = document.getElementById('tooltip');
-                
-                // Variables para calcular la "caja" exterior que contiene todo el edificio
-                let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+                let centerGeoX = 0, centerGeoY = 0, numRooms = 0;
 
-                // 1. Encontrar los límites geográficos del proyecto
                 data.forEach(room => {
-                    room.geometria_2d.forEach(loop => {
-                        loop.forEach(pt => {
-                            if(pt.x < minX) minX = pt.x;
-                            if(pt.x > maxX) maxX = pt.x;
-                            if(pt.y < minY) minY = pt.y;
-                            if(pt.y > maxY) maxY = pt.y;
-                        });
+                    if (!room.geometria_2d || room.geometria_2d.length === 0) return;
+
+                    // Asignar color según el Nivel
+                    if (!coloresPorNivel[room.nivel]) {
+                        coloresPorNivel[room.nivel] = getColorFresco();
+                    }
+
+                    // Loop principal (Contorno exterior)
+                    const outerLoop = room.geometria_2d[0];
+                    const shape = new THREE.Shape();
+                    shape.moveTo(outerLoop[0].x, outerLoop[0].y);
+                    for (let i = 1; i < outerLoop.length; i++) {
+                        shape.lineTo(outerLoop[i].x, outerLoop[i].y);
+                    }
+
+                    // Loops secundarios (Huecos / Columnas / Ductos) solucionan el error de los triángulos
+                    for (let i = 1; i < room.geometria_2d.length; i++) {
+                        const holeLoop = room.geometria_2d[i];
+                        const holeShape = new THREE.Path();
+                        holeShape.moveTo(holeLoop[0].x, holeLoop[0].y);
+                        for (let j = 1; j < holeLoop.length; j++) {
+                            holeShape.lineTo(holeLoop[j].x, holeLoop[j].y);
+                        }
+                        shape.holes.push(holeShape);
+                    }
+
+                    // Modelar la extrusión (Darle 3D)
+                    const extrudeSettings = { 
+                        depth: room.altura > 0 ? room.altura : 3.0, // Si no tiene altura, le damos 3m por defecto
+                        bevelEnabled: false 
+                    };
+                    const geometry = new THREE.ExtrudeGeometry(shape, extrudeSettings);
+
+                    const material = new THREE.MeshStandardMaterial({ 
+                        color: coloresPorNivel[room.nivel],
+                        transparent: true,
+                        opacity: 0.7,
+                        side: THREE.DoubleSide
                     });
+
+                    const mesh = new THREE.Mesh(geometry, material);
+
+                    // Rotar el objeto porque Three.js usa 'Y' como arriba, pero Revit usa 'Z'.
+                    mesh.rotation.x = -Math.PI / 2;
+                    // Posicionarlo en su elevación de piso real
+                    mesh.position.y = room.z_base;
+                    
+                    // Guardar los datos BIM dentro del objeto 3D
+                    mesh.userData = room;
+                    
+                    scene.add(mesh);
+                    meshes.push(mesh);
+
+                    // Sumar para encontrar el centro del proyecto
+                    centerGeoX += outerLoop[0].x;
+                    centerGeoY += outerLoop[0].y;
+                    numRooms++;
                 });
 
-                // 2. Configurar la cámara web (viewBox) para encuadrar todo el edificio automáticamente
-                const width = maxX - minX;
-                const height = maxY - minY;
-                const marginX = width * 0.05; // 5% de margen
-                const marginY = height * 0.05;
-                
-                // NOTA: El eje Y en la web crece hacia abajo, pero en Revit crece hacia arriba.
-                // Invertimos las coordenadas matemáticas en la visualización.
-                svg.setAttribute('viewBox', `${minX - marginX} ${-(maxY + marginY)} ${width + (marginX*2)} ${height + (marginY*2)}`);
-
-                // 3. Dibujar cada habitación
-                data.forEach(room => {
-                    room.geometria_2d.forEach(loop => {
-                        const poly = document.createElementNS("http://www.w3.org/2000/svg", "polygon");
-                        
-                        // Mapear los puntos e invertir el eje Y para que no salga de cabeza
-                        const pointsStr = loop.map(pt => `${pt.x},${-pt.y}`).join(" ");
-                        poly.setAttribute("points", pointsStr);
-                        poly.setAttribute("class", "room");
-                        
-                        // 4. Agregar interactividad (Ratón encima)
-                        poly.addEventListener('mousemove', (e) => {
-                            tooltip.style.opacity = 1;
-                            tooltip.style.left = (e.pageX + 15) + 'px';
-                            tooltip.style.top = (e.pageY + 15) + 'px';
-                            tooltip.innerHTML = `
-                                <strong>${room.nombre}</strong><br>
-                                Número: ${room.numero}<br>
-                                Área: ${room.area_m2} m²<br>
-                                Nivel: ${room.nivel}
-                            `;
-                        });
-                        
-                        // Ocultar datos al quitar el ratón
-                        poly.addEventListener('mouseout', () => {
-                            tooltip.style.opacity = 0;
-                        });
-                        
-                        svg.appendChild(poly);
-                    });
-                });
+                // Apuntar la cámara al centro del edificio
+                if(numRooms > 0) {
+                    centerGeoX /= numRooms;
+                    centerGeoY /= numRooms;
+                    
+                    controls.target.set(centerGeoX, 0, -centerGeoY);
+                    camera.position.set(centerGeoX + 40, 50, -centerGeoY + 40);
+                    controls.update();
+                }
             })
-            .catch(error => {
-                console.error("Error:", error);
-                document.body.innerHTML += `<p style="color:red; font-weight:bold;">Error: Asegúrate de que el archivo 'Rooms_Geometria.json' está subido al repositorio y bien escrito.</p>`;
-            });
+            .catch(e => console.error("Error al cargar JSON:", e));
+
+        // 5. Interactividad: Detectar ratón sobre el 3D
+        const raycaster = new THREE.Raycaster();
+        const mouse = new THREE.Vector2();
+        let hoveredMesh = null;
+
+        window.addEventListener('mousemove', (e) => {
+            // Convertir coordenadas del ratón
+            mouse.x = (e.clientX / window.innerWidth) * 2 - 1;
+            mouse.y = -(e.clientY / window.innerHeight) * 2 + 1;
+
+            raycaster.setFromCamera(mouse, camera);
+            const intersects = raycaster.intersectObjects(meshes);
+
+            if (intersects.length > 0) {
+                const object = intersects[0].object;
+                if (hoveredMesh !== object) {
+                    if (hoveredMesh) hoveredMesh.material.emissive.setHex(0x000000); // Quitar brillo al anterior
+                    
+                    hoveredMesh = object;
+                    hoveredMesh.material.emissive.setHex(0x555555); // Dar brillo al actual
+                    
+                    // Actualizar panel de texto
+                    document.getElementById('room-name').innerText = object.userData.nombre;
+                    document.getElementById('room-level').innerText = "Nivel: " + object.userData.nivel;
+                    document.getElementById('room-area').innerText = "Área: " + object.userData.area_m2 + " m²";
+                }
+            } else {
+                if (hoveredMesh) {
+                    hoveredMesh.material.emissive.setHex(0x000000);
+                    hoveredMesh = null;
+                    
+                    document.getElementById('room-name').innerText = "Viendo Modelo...";
+                    document.getElementById('room-level').innerText = "";
+                    document.getElementById('room-area').innerText = "";
+                }
+            }
+        });
+
+        // Loop de renderizado
+        function animate() {
+            requestAnimationFrame(animate);
+            controls.update();
+            renderer.render(scene, camera);
+        }
+        animate();
+
+        // Ajustar tamaño al cambiar la ventana
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
     </script>
 </body>
 </html>
